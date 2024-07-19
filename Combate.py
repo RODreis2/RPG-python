@@ -1,18 +1,19 @@
 import random
-from Personagem import personagem, ataques, nivel, dinheiro, xp
-from monstros import monstros
+from Personagem import personagem
+from Monstros import monstros
 
 
 def combate():
     monstro = random.choice(monstros)
     print(f"combate iniciado com {monstro}")
     
-    def atacar_primeiro():
-        if personagem[4] > monstro[4]:
-            return True
-        else:
-            return False
+    def atacar_primeiro(personagem, monstro):
+        return personagem[4] >= monstro[4]
     
-    if atacar_primeiro:
-        for i,n in range(ataques):
-            print(i,n)
+    if atacar_primeiro(personagem, monstro):
+        # Imprime os ataques do personagem
+        for i, ataque in enumerate(personagem['ataques']):
+            print(f" {i}, Ataque: {personagem.ataques}")
+    else:
+        # Imprime o ataque do monstro
+        print(f"O monstro utilizou o ataque {monstro.ataque}")
