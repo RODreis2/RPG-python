@@ -1,19 +1,21 @@
 import random
-from Personagem import personagem
-from Monstros import monstros
+from Personagem import character
+from Monstros import monster
 
 
-def combate():
-    monstro = random.choice(monstros)
-    print(f"combate iniciado com {monstro}")
+def combat():
+    Combat_monster = random.choice(monster)
+    print(f"combate iniciado com {Combat_monster}")
     
-    def atacar_primeiro(personagem, monstro):
-        return personagem[4] >= monstro[4]
+    def atacar_primeiro(character, Combat_monster):
+        return character.status[4] >= Combat_monster.status[4]
     
-    if atacar_primeiro(personagem, monstro):
+    if atacar_primeiro(character, Combat_monster):
         # Imprime os ataques do personagem
-        for i, ataque in enumerate(personagem['ataques']):
-            print(f" {i}, Ataque: {personagem.ataques}")
+        for i, ataque in enumerate(character['ataques']):
+            print(f" {i}, Ataque: {character.ataques}")
     else:
-        # Imprime o ataque do monstro
-        print(f"O monstro utilizou o ataque {monstro.ataque}")
+        # Imprime o ataque do Combat_monster
+        print(f"O Combat_monster utilizou o ataque {Combat_monster.attack_methods}")
+
+combat()
