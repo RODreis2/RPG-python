@@ -7,11 +7,12 @@ class character:
     xp = 0
     money = 100
 
-def Player_class(name, life, strengh, speed, stamina):
+def Player_class(name, life, strengh,defense, speed, stamina):
     global status
     status = []
     status.append(name)
     status.append(life)
+    status.append(strengh)
     status.append(strengh)
     status.append(speed)
     status.append(stamina)
@@ -26,13 +27,13 @@ while Chose_Player_class != "G" and Chose_Player_class != "A" and Chose_Player_c
 name = str(input("digite o name do seu persoangem: "))
 
 if Chose_Player_class == "G":
-    guerreiro = Player_class(name,150, 25, 8, 150)
+    guerreiro = Player_class(name,150,15, 25, 8, 150)
     attacks = {"corte":10, "corte flamejante":15}  
 
 elif Chose_Player_class == "A":
-    arqueiro = Player_class(name, 75, 15, 30, 200)
+    arqueiro = Player_class(name, 75,10, 15, 30, 200)
     attacks = {"flecha simples":10, "chuva de flechas":25}  
 
 elif Chose_Player_class == "M":
-    mago = Player_class(name, 50, 35, 10, 300)
+    mago = Player_class(name, 50,5, 35, 10, 300)
     attacks = {"espinhos de pedra":20, "bola de fogo":50}
