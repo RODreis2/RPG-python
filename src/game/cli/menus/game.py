@@ -1,4 +1,5 @@
 from Personagem import character
+import click
 
 def mostrar_menu():
     print("========== MENU ==========")
@@ -30,24 +31,21 @@ def sair_do_jogo():
     print("Saindo do jogo. Até a próxima!")
 
 def menu_principal():
-    while True:
+        click.clear()
         mostrar_menu()
-        escolha = input("Escolha uma opção: ")
-
-        if escolha == '1':
+        menu_escolha = click.prompt("Escolha uma opção: ", type=click.IntRange(1,5), show_choices=True)
+        if menu_escolha == '1':
             ir_para_dungeon()
-        elif escolha == '2':
+        elif menu_escolha == '2':
             ir_para_loja()
-        elif escolha == '3':
+        elif menu_escolha == '3':
             olhar_equipamentos()
-        elif escolha == '4':
+        elif menu_escolha == '4':
             olhar_status()
-        elif escolha == '5':
+        elif menu_escolha == '5':
             sair_do_jogo()
-            break
-        else:
-            print("Opção inválida! Tente novamente.")
-            continue
+            
+    
 
 if __name__ == "__main__":
     menu_principal()
