@@ -1,6 +1,6 @@
 import random
-from Personagem import character
-from Monstros import monster
+from Personagem import character 
+from Monstros import monster 
 
 
 def combat():
