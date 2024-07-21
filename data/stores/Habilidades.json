@@ -1,0 +1,19 @@
+{
+    "bola de fogo": {
+        "dano": {
+            "min": 5,
+            "max": 10
+        },
+        "gasto_mana": 20,
+        "description": "o usuário conjura uma esfera de chamas que causa danos significativos"
+    },
+    "slash": {
+        "dano": {
+            "min": 8,
+            "max": 10
+        },
+        "gasto_estamina": 30,
+        "description": "Um ataque cortante perfura o ar com precisão"
+    }
+}
+
