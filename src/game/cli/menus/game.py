@@ -1,7 +1,7 @@
 from Personagem import character
 import click
 
-def mostrar_menu():
+def show_menu():
     print("========== MENU ==========")
     print("1. Ir para Dungeon")
     print("2. Ir para Loja")
@@ -10,40 +10,40 @@ def mostrar_menu():
     print("5. Sair do Jogo")
     print("==========================")
 
-def ir_para_dungeon():
+def go_dungeon():
     print("Você está entrando na dungeon...")
     #Escrever geração de mapa @joca
 
-def ir_para_loja():
+def go_store():
     print("Você está indo para a loja...")
     #Integrar o json com a loja e exibir
 
-def olhar_equipamentos():
+def look_equipment():
     print("Aqui estão seus equipamentos")
     #exibir os equipamentos 
 
-def olhar_status():
+def look_status():
     print("Estes são os seus status")
     print(character.status)
     #melhorar isso
 
-def sair_do_jogo():
+def Leave_game():
     print("Saindo do jogo. Até a próxima!")
 
 def menu_principal():
         click.clear()
-        mostrar_menu()
+        show_menu()
         menu_escolha = click.prompt("Escolha uma opção: ", type=click.IntRange(1,5), show_choices=True)
         if menu_escolha == '1':
-            ir_para_dungeon()
+            go_dungeon()
         elif menu_escolha == '2':
-            ir_para_loja()
+            go_store()
         elif menu_escolha == '3':
-            olhar_equipamentos()
+            look_equipment()
         elif menu_escolha == '4':
-            olhar_status()
+            look_status()
         elif menu_escolha == '5':
-            sair_do_jogo()
+            Leave_game()
             
     
 

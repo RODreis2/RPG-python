@@ -5,10 +5,11 @@ class loja:
         attacks = []
        
 
-    def itens(self,name,type, functions):
+    def itens(self,name,type, functions, value):
         self.name = name
         self.type = type
         self.function = functions
+        self.value = value
     
     def attacks(self, name, damage, description):
         self.name = name
@@ -16,7 +17,7 @@ class loja:
         self.description = description
         description = []
    
- 
+    
  
 
        
