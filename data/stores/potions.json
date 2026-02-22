@@ -1,0 +1,16 @@
+{
+  "potions": [
+    {
+      "name": "Minor Healing Potion",
+      "price": 10,
+      "stock_amount": 1,
+      "description": "Restore health during combat."
+    },
+    {
+      "name": "Traveler Bundle",
+      "price": 24,
+      "stock_amount": 3,
+      "description": "A discounted pack of three healing potions."
+    }
+  ]
+}

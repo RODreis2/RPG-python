@@ -1,0 +1,22 @@
+{
+  "weapons": [
+    {
+      "name": "Iron Sword",
+      "rarity": "common",
+      "min_damage": 4,
+      "max_damage": 7
+    },
+    {
+      "name": "Oak Staff",
+      "rarity": "common",
+      "min_damage": 3,
+      "max_damage": 8
+    },
+    {
+      "name": "Hunter Bow",
+      "rarity": "uncommon",
+      "min_damage": 5,
+      "max_damage": 9
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+"""Terminal RPG package."""
