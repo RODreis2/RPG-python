@@ -1,17 +1,21 @@
 import curses
+import os
 import random
 import time
 from dataclasses import dataclass
 
 from .data_loader import load_monsters, load_opening_lines, load_potions, load_skills
 from .models import Monster, Player
+from .systems.archer_training import start_archer_training
+from .systems.meditation_training import start_meditation_training
+from .systems.warrior_training import start_warrior_training
 from .systems.map_generator import DungeonMap, TILE_DOOR, TILE_FLOOR
 
 
 CLASS_TEMPLATES = {
-    "Warrior": {"hp": 120, "strength": 16, "defense": 12, "speed": 8},
-    "Mage": {"hp": 85, "strength": 18, "defense": 7, "speed": 10},
-    "Archer": {"hp": 95, "strength": 14, "defense": 9, "speed": 14},
+    "Warrior": {"hp": 120, "mp": 16, "strength": 16, "defense": 12, "speed": 8},
+    "Mage": {"hp": 85, "mp": 36, "strength": 18, "defense": 7, "speed": 10},
+    "Archer": {"hp": 95, "mp": 20, "strength": 14, "defense": 9, "speed": 14},
 }
 
 COMBAT_OPTIONS = ["Attack", "Skill", "Item", "Run"]
@@ -126,6 +130,7 @@ class DungeonSession:
     player_y: int
     exit_x: int
     exit_y: int
+    treasures: dict[tuple[int, int], str]
     message: str = "Explore carefully."
 
 
@@ -141,6 +146,8 @@ class GameEngine:
         self._typing_delay = 0.02
         self._typing_skip_until = 0.0
         self.dungeon_level = 1
+        self._unicode_ui = os.environ.get("TERM_REALMS_ASCII", "0") != "1"
+        self._monster_hit_flash_until = 0.0
 
     def run(self) -> None:
         curses.wrapper(self._run_curses)
@@ -171,6 +178,8 @@ class GameEngine:
                 archetype=archetype,
                 max_hp=stats["hp"],
                 hp=stats["hp"],
+                max_mp=stats["mp"],
+                mp=stats["mp"],
                 strength=stats["strength"],
                 defense=stats["defense"],
                 speed=stats["speed"],
@@ -184,15 +193,28 @@ class GameEngine:
             return
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        # Warm, muted handheld-inspired palette.
+        curses.init_pair(1, curses.COLOR_BLUE, -1)      # border/navy
+        curses.init_pair(2, curses.COLOR_GREEN, -1)     # positive/accent
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)    # highlight/select
         curses.init_pair(4, curses.COLOR_RED, -1)
-        curses.init_pair(5, curses.COLOR_WHITE, -1)
-        curses.init_pair(6, curses.COLOR_MAGENTA, -1)
+        curses.init_pair(5, curses.COLOR_WHITE, -1)     # primary text
+        curses.init_pair(6, curses.COLOR_MAGENTA, -1)   # flavor text
+        curses.init_pair(7, curses.COLOR_WHITE, -1)     # muted text (with A_DIM)
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_GREEN)
+        curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_RED)
+        curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
     def _main_menu_loop(self, stdscr: curses.window) -> None:
         assert self.player is not None
+        menu_info = {
+            "Dungeon": "Risk combat, clear floors, and earn gold by reaching the door.",
+            "Market": "Spend gold on potions to sustain longer dungeon runs.",
+            "Training": "Class drills: Warrior reflex, Mage meditation, Archer conditioning.",
+            "Status": "Review stats, progression, and your class portrait.",
+            "Quit": "Leave this run and return to the start menu.",
+        }
         while self.player.is_alive():
             option = self._menu_screen(
                 stdscr,
@@ -200,6 +222,8 @@ class GameEngine:
                 ["Dungeon", "Market", "Training", "Status", "Quit"],
                 subtitle="Wander, grow, survive.",
                 status=self._status_line(),
+                info_map=menu_info,
+                context_tag="main",
             )
 
             if option == 0:
@@ -228,9 +252,13 @@ class GameEngine:
         while (exit_x, exit_y) == (player_x, player_y):
             exit_x, exit_y = dungeon.random_floor_tile()
 
-        session = DungeonSession(grid, player_x, player_y, exit_x, exit_y)
+        treasures = self._generate_dungeon_treasures(
+            dungeon,
+            occupied={(player_x, player_y), (exit_x, exit_y)},
+        )
+        session = DungeonSession(grid, player_x, player_y, exit_x, exit_y, treasures)
         session.grid[exit_y][exit_x] = TILE_DOOR
-        session.message = f"Dungeon Level {self.dungeon_level}"
+        session.message = f"Dungeon Level {self.dungeon_level} | Treasures: {len(session.treasures)}"
 
         while self.player.is_alive():
             self._draw_dungeon(stdscr, session)
@@ -262,6 +290,10 @@ class GameEngine:
                 self.dungeon_level += 1
                 self._toast(stdscr, f"Door reached. +{bonus} gold. Dungeon level {self.dungeon_level}.")
                 return
+
+            if (nx, ny) in session.treasures:
+                session.message = self._collect_dungeon_treasure(session, (nx, ny))
+                continue
 
             if not self._dungeon_event(stdscr, session):
                 return
@@ -310,8 +342,63 @@ class GameEngine:
             weighted.extend([monster] * copies)
         return random.choice(weighted) if weighted else random.choice(self.monsters)
 
+    def _generate_dungeon_treasures(
+        self,
+        dungeon: DungeonMap,
+        occupied: set[tuple[int, int]],
+    ) -> dict[tuple[int, int], str]:
+        loot_pool = [
+            "Iron Sword",
+            "Hunter Bow",
+            "Arcane Tome",
+            "Guardian Charm",
+            "Potion Cache",
+            "Gold Satchel",
+        ]
+        count = random.randint(2, 4)
+        treasures: dict[tuple[int, int], str] = {}
+        attempts = 0
+        while len(treasures) < count and attempts < 220:
+            attempts += 1
+            tx, ty = dungeon.random_floor_tile()
+            if (tx, ty) in occupied or (tx, ty) in treasures:
+                continue
+            treasures[(tx, ty)] = random.choice(loot_pool)
+        return treasures
+
+    def _collect_dungeon_treasure(self, session: DungeonSession, pos: tuple[int, int]) -> str:
+        assert self.player is not None
+        loot = session.treasures.pop(pos, "Mysterious Cache")
+        if loot == "Iron Sword":
+            gain = 3 if self.player.archetype == "Warrior" else 2
+            self.player.strength += gain
+            return f"Treasure found: Iron Sword. +{gain} STR."
+        if loot == "Hunter Bow":
+            self.player.speed += 2
+            if self.player.archetype == "Archer":
+                self.player.strength += 1
+                return "Treasure found: Hunter Bow. +2 SPD, +1 STR."
+            return "Treasure found: Hunter Bow. +2 SPD."
+        if loot == "Arcane Tome":
+            self.player.max_mp += 4
+            restored = self.player.restore_mp(8)
+            return f"Treasure found: Arcane Tome. +4 MAX MP, +{restored} MP."
+        if loot == "Guardian Charm":
+            self.player.defense += 2
+            return "Treasure found: Guardian Charm. +2 DEF."
+        if loot == "Potion Cache":
+            add = random.randint(1, 2)
+            self.player.potions += add
+            healed = self.player.heal(12)
+            return f"Treasure found: Potion Cache. +{add} potion(s), +{healed} HP."
+
+        gold = random.randint(12, 28)
+        self.player.gold += gold
+        return f"Treasure found: Gold Satchel. +{gold} gold."
+
     def _combat_mode(self, stdscr: curses.window, monster: Monster, session: DungeonSession) -> bool:
         assert self.player is not None
+        self._monster_hit_flash_until = 0.0
         log: list[str] = []
         class_skills = self.skills.get(self.player.archetype, [])
         selected = 0
@@ -331,23 +418,43 @@ class GameEngine:
 
             action = COMBAT_OPTIONS[selected]
             if action == "Attack":
-                dmg = self._roll_damage(self.player.strength, monster.defense)
+                dmg, attack_note = self._roll_player_damage(self.player.strength, monster.defense)
                 monster.hp -= dmg
+                self._monster_hit_flash_until = time.monotonic() + 0.28
+                self._animate_monster_hit_flash(stdscr, monster, log, session, selected)
                 self._append_combat_log_typed(
-                    stdscr, monster, session, selected, log, f"You strike for {dmg} damage."
+                    stdscr, monster, session, selected, log, f"You strike for {dmg} damage. {attack_note}".strip()
                 )
             elif action == "Skill":
                 if class_skills:
                     skill = random.choice(class_skills)
-                    if random.random() <= skill["accuracy"]:
-                        dmg = self._roll_damage(
+                    mp_cost = int(skill.get("mp_cost", 0))
+                    is_mage = self.player.archetype == "Mage"
+                    if is_mage and not self.player.spend_mp(mp_cost):
+                        self._append_combat_log_typed(
+                            stdscr,
+                            monster,
+                            session,
+                            selected,
+                            log,
+                            f"Not enough MP for {skill['name']} ({mp_cost} MP).",
+                        )
+                    elif random.random() <= skill["accuracy"]:
+                        dmg, attack_note = self._roll_player_damage(
                             self.player.strength,
                             monster.defense,
                             skill["bonus_damage"],
                         )
                         monster.hp -= dmg
+                        self._monster_hit_flash_until = time.monotonic() + 0.28
+                        self._animate_monster_hit_flash(stdscr, monster, log, session, selected)
                         self._append_combat_log_typed(
-                            stdscr, monster, session, selected, log, f"{skill['name']} hits for {dmg}."
+                            stdscr,
+                            monster,
+                            session,
+                            selected,
+                            log,
+                            f"{skill['name']} hits for {dmg}. {attack_note}".strip(),
                         )
                     else:
                         self._append_combat_log_typed(
@@ -377,10 +484,15 @@ class GameEngine:
                 )
 
             if monster.is_alive():
-                retaliate = self._roll_damage(monster.strength, self.player.defense)
+                retaliate, enemy_note = self._roll_enemy_damage(monster.strength, self.player.defense)
                 self.player.hp -= retaliate
                 self._append_combat_log_typed(
-                    stdscr, monster, session, selected, log, f"{monster.name} hits you for {retaliate}."
+                    stdscr,
+                    monster,
+                    session,
+                    selected,
+                    log,
+                    f"{monster.name} hits you for {retaliate}. {enemy_note}".strip(),
                 )
 
         if self.player.is_alive():
@@ -426,6 +538,50 @@ class GameEngine:
 
     def _training_mode(self, stdscr: curses.window) -> None:
         assert self.player is not None
+        if self.player.archetype == "Mage":
+            self._toast(
+                stdscr,
+                "Mage Training: move @ with W/A/S/D, avoid x/o, preserve Focus, Q to exit.",
+            )
+            result = start_meditation_training(stdscr, self.player)
+            self.player.hp = max(1, self.player.hp - result.hp_cost)
+            self.player.speed += result.speed_gain
+            leveled = self.player.gain_xp(result.xp_gain)
+            msg = result.summary
+            if leveled:
+                msg += " | LEVEL UP"
+            self._toast(stdscr, msg)
+            return
+        if self.player.archetype == "Warrior":
+            self._toast(
+                stdscr,
+                "Warrior Training: W(up) S(down) A(left) D(right) to parry incoming strikes.",
+            )
+            result = start_warrior_training(stdscr, self.player)
+            self.player.hp = max(1, self.player.hp - result.hp_cost)
+            self.player.strength += result.strength_gain
+            self.player.defense += result.defense_gain
+            leveled = self.player.gain_xp(result.xp_gain)
+            msg = result.summary
+            if leveled:
+                msg += " | LEVEL UP"
+            self._toast(stdscr, msg)
+            return
+        if self.player.archetype == "Archer":
+            self._toast(
+                stdscr,
+                "Archer Training: W/S move, hold/release SPACE to shoot right, hit moving o targets.",
+            )
+            result = start_archer_training(stdscr, self.player)
+            self.player.hp = max(1, self.player.hp - result.hp_cost)
+            self.player.speed += result.speed_gain
+            leveled = self.player.gain_xp(result.xp_gain)
+            msg = result.summary
+            if leveled:
+                msg += " | LEVEL UP"
+            self._toast(stdscr, msg)
+            return
+
         hp_cost = random.randint(4, 10)
         xp_gain = random.randint(20, 40)
         speed_gain = 1 if random.random() < 0.3 else 0
@@ -452,7 +608,7 @@ class GameEngine:
             self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w, "CHARACTER STATUS")
 
             content_y = frame_y + 2
-            content_h = frame_h - 4
+            content_h = frame_h - 8
             left_w = max(26, frame_w // 2)
             left_w = min(left_w, frame_w - 24)
             left_x = frame_x + 2
@@ -480,13 +636,14 @@ class GameEngine:
                     break
                 centered_x = right_x + max(2, (right_w - len(line)) // 2)
                 self._safe_addstr(stdscr, y, centered_x, line[: right_w - 4], self._c(2) | curses.A_BOLD)
-
-            self._safe_addstr(
+            self._draw_dialog_box(
                 stdscr,
-                frame_y + frame_h - 2,
-                frame_x + 2,
-                "Press Q or ESC to return",
-                self._c(1) | curses.A_BOLD,
+                frame_y,
+                frame_x,
+                frame_h,
+                frame_w,
+                "Character status overview.",
+                "Press Q, ESC, or Enter to return.",
             )
             stdscr.refresh()
             animated = True
@@ -553,7 +710,7 @@ class GameEngine:
 
             stats = CLASS_TEMPLATES[options[idx]]
             stats_line = (
-                f"HP {stats['hp']}  STR {stats['strength']}  "
+                f"HP {stats['hp']}  MP {stats['mp']}  STR {stats['strength']}  "
                 f"DEF {stats['defense']}  SPD {stats['speed']}"
             )
             self._safe_addstr(
@@ -669,49 +826,178 @@ class GameEngine:
         subtitle: str = "",
         selected: int = 0,
         status: str = "",
+        info_map: dict[str, str] | None = None,
+        animate: bool = True,
+        context_tag: str = "",
     ) -> int:
         idx = max(0, min(selected, len(options) - 1))
         header_animated = False
-        while True:
-            self._draw_background(stdscr, 7)
-            frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
-            self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w)
-            self._draw_header_art(stdscr, frame_y, frame_x, title, subtitle, animate=not header_animated)
-            header_animated = True
+        stdscr.timeout(40 if animate else -1)
+        try:
+            while True:
+                phase = int(time.monotonic() * 8)
+                self._draw_background(stdscr, 7 + (phase % 5 if animate else 0))
+                frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
+                self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w)
+                self._draw_header_art(stdscr, frame_y, frame_x, title, subtitle, animate=not header_animated)
+                header_animated = True
 
-            start_y = frame_y + 8
-            for i, option in enumerate(options):
-                y = start_y + i
-                if y >= frame_y + frame_h - 3:
-                    break
-                marker = ">" if i == idx else " "
-                attr = self._c(3) | curses.A_BOLD if i == idx else self._c(5)
-                self._safe_addstr(stdscr, y, frame_x + 4, f"{marker} {option}", attr)
+                content_y = frame_y + 8
+                content_h = frame_h - 15
+                is_split = frame_w >= 70 and content_h >= 8
 
-            if status:
-                self._safe_addstr(
-                    stdscr,
-                    frame_y + frame_h - 3,
-                    frame_x + 2,
-                    status[: frame_w - 4],
-                    self._c(2) | curses.A_BOLD,
+                if is_split:
+                    left_w = max(22, min(34, frame_w // 3))
+                    left_x = frame_x + 2
+                    right_x = left_x + left_w + 2
+                    right_w = max(20, frame_x + frame_w - 2 - right_x)
+
+                    self._draw_panel(stdscr, content_y, left_x, content_h, left_w, "OPTIONS")
+                    self._draw_panel(stdscr, content_y, right_x, content_h, right_w, "DETAILS")
+
+                    start_y = content_y + 2
+                    for i, option in enumerate(options):
+                        y = start_y + i * 2
+                        if y >= content_y + content_h - 2:
+                            break
+                        pulse_on = animate and i == idx and (phase % 2 == 0)
+                        marker = ">" if i == idx else " "
+                        attr = (self._c(1) | curses.A_BOLD) if pulse_on else (
+                            self._c(3) | curses.A_BOLD if i == idx else self._c(5)
+                        )
+                        self._safe_addstr(stdscr, y, left_x + 2, f"{marker} {option}"[: left_w - 4], attr)
+                        if i == idx and animate:
+                            trail = ".:" if (phase % 3 == 0) else ":."
+                            self._safe_addstr(stdscr, y, left_x + left_w - 4, trail, self._c(2))
+
+                    selected_option = options[idx]
+                    details = (
+                        info_map.get(selected_option, self._menu_option_info(selected_option, context_tag))
+                        if info_map
+                        else self._menu_option_info(selected_option, context_tag)
+                    )
+                    self._safe_addstr(
+                        stdscr,
+                        content_y + 2,
+                        right_x + 2,
+                        f"Selected: {selected_option}"[: right_w - 4],
+                        self._c(3) | curses.A_BOLD,
+                    )
+                    self._safe_addstr(
+                        stdscr,
+                        content_y + 4,
+                        right_x + 2,
+                        details[: right_w - 4],
+                        self._c(5),
+                    )
+                    hint = self._menu_context_hint(selected_option, context_tag)
+                    if hint:
+                        self._safe_addstr(
+                            stdscr,
+                            content_y + 6,
+                            right_x + 2,
+                            hint[: right_w - 4],
+                            self._c(2) | curses.A_BOLD,
+                        )
+
+                    if animate:
+                        shimmer_y = content_y + content_h - 3
+                        shimmer_w = max(0, right_w - 4)
+                        shimmer = "".join(
+                            ":" if ((phase + i) % 7 == 0) else ("." if ((phase + i) % 3 == 0) else " ")
+                            for i in range(shimmer_w)
+                        )
+                        self._safe_addstr(stdscr, shimmer_y, right_x + 2, shimmer, self._c(1))
+                else:
+                    start_y = frame_y + 8
+                    for i, option in enumerate(options):
+                        y = start_y + i
+                        if y >= frame_y + frame_h - 8:
+                            break
+                        pulse_on = animate and i == idx and (phase % 2 == 0)
+                        marker = ">" if i == idx else " "
+                        attr = (self._c(1) | curses.A_BOLD) if pulse_on else (
+                            self._c(3) | curses.A_BOLD if i == idx else self._c(5)
+                        )
+                        self._safe_addstr(stdscr, y, frame_x + 4, f"{marker} {option}", attr)
+
+                    selected_option = options[idx]
+                    details = (
+                        info_map.get(selected_option, self._menu_option_info(selected_option, context_tag))
+                        if info_map
+                        else self._menu_option_info(selected_option, context_tag)
+                    )
+                    self._safe_addstr(
+                        stdscr,
+                        frame_y + frame_h - 4,
+                        frame_x + 2,
+                        details[: frame_w - 4],
+                        self._c(2),
+                    )
+
+                if status:
+                    self._safe_addstr(
+                        stdscr,
+                        frame_y + frame_h - 8,
+                        frame_x + 2,
+                        status[: frame_w - 4],
+                        self._c(2) | curses.A_BOLD,
+                    )
+                dialog_text = (
+                    f"{selected_option}: {details}"
+                    if 'selected_option' in locals()
+                    else "Choose an option."
                 )
-            self._safe_addstr(
-                stdscr,
-                frame_y + frame_h - 2,
-                frame_x + 2,
-                "Arrow keys/W-S + Enter",
-                self._c(1) | curses.A_BOLD,
-            )
-            stdscr.refresh()
+                self._draw_dialog_box(
+                    stdscr,
+                    frame_y,
+                    frame_x,
+                    frame_h,
+                    frame_w,
+                    dialog_text,
+                    "Arrow keys/W/S to move | Enter to confirm",
+                )
+                stdscr.refresh()
 
-            key = stdscr.getch()
-            if key in (curses.KEY_UP, ord("w"), ord("W")):
-                idx = (idx - 1) % len(options)
-            elif key in (curses.KEY_DOWN, ord("s"), ord("S")):
-                idx = (idx + 1) % len(options)
-            elif key in (10, 13, curses.KEY_ENTER):
-                return idx
+                key = stdscr.getch()
+                if key in (curses.KEY_UP, ord("w"), ord("W")):
+                    idx = (idx - 1) % len(options)
+                elif key in (curses.KEY_DOWN, ord("s"), ord("S")):
+                    idx = (idx + 1) % len(options)
+                elif key in (10, 13, curses.KEY_ENTER):
+                    return idx
+        finally:
+            stdscr.timeout(-1)
+
+    def _menu_option_info(self, option: str, context_tag: str = "") -> str:
+        if context_tag == "main":
+            info = {
+                "Dungeon": "Risk combat, clear floors, and earn gold by reaching the door.",
+                "Market": "Spend gold on potions to sustain longer dungeon runs.",
+                "Training": "Class drills: Warrior reflex, Mage meditation, Archer conditioning.",
+                "Status": "Review stats, progression, and your class portrait.",
+                "Quit": "Leave this run and return to the start menu.",
+            }
+        else:
+            info = {
+                "Back to Start Menu": "Return to the title flow and begin a new character run.",
+                "Exit Game": "Close the game session now.",
+                "Back": "Return to the previous menu.",
+            }
+        return info.get(option, "No details available.")
+
+    def _menu_context_hint(self, option: str, context_tag: str = "") -> str:
+        if context_tag != "main" or self.player is None:
+            return ""
+        if option == "Market" and self.player.gold < 15:
+            return "Tip: Clear a dungeon floor first to build buying power."
+        if option == "Training" and self.player.archetype == "Mage":
+            return "Tip: Longer focus survival improves meditation rewards."
+        if option == "Status":
+            return "Tip: Check XP progress before choosing your next move."
+        if option == "Dungeon" and self.player.hp <= max(20, self.player.max_hp // 3):
+            return "Tip: Low HP increases risk; consider Market or Training first."
+        return ""
 
     def _draw_dungeon(self, stdscr: curses.window, session: DungeonSession) -> None:
         assert self.player is not None
@@ -723,7 +1009,7 @@ class GameEngine:
         map_w = len(session.grid[0])
         map_x = frame_x + max(2, (frame_w - map_w) // 2)
         map_y = frame_y + 2
-        max_map_y = frame_y + frame_h - 5
+        max_map_y = frame_y + frame_h - 9
         if map_y + map_h > max_map_y:
             map_y = max(frame_y + 2, max_map_y - map_h)
 
@@ -736,21 +1022,24 @@ class GameEngine:
             map_w,
             (session.player_x, session.player_y),
             (session.exit_x, session.exit_y),
+            set(session.treasures.keys()),
         )
 
         self._safe_addstr(
             stdscr,
-            frame_y + frame_h - 3,
+            frame_y + 1,
             frame_x + 2,
             self._status_line()[: frame_w - 4],
             self._c(5) | curses.A_BOLD,
         )
-        self._safe_addstr(
+        self._draw_dialog_box(
             stdscr,
-            frame_y + frame_h - 2,
-            frame_x + 2,
-            f"{session.message} | Move: W/A/S/D or arrows | Q leave"[: frame_w - 4],
-            self._c(1),
+            frame_y,
+            frame_x,
+            frame_h,
+            frame_w,
+            f"{session.message} | Treasures left: {len(session.treasures)}",
+            "Move W/A/S/D or arrows | Q to leave dungeon.",
         )
         stdscr.refresh()
 
@@ -763,12 +1052,14 @@ class GameEngine:
         selected: int,
     ) -> None:
         assert self.player is not None
+        blink_phase = int(time.monotonic() * 18) % 2 == 0
+        monster_flash = time.monotonic() < self._monster_hit_flash_until and blink_phase
         self._draw_background(stdscr, 59)
         frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
         self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w, "COMBAT")
 
         content_y = frame_y + 2
-        content_h = frame_h - 5
+        content_h = frame_h - 9
         left_w = min(len(session.grid[0]) + 2, max(26, frame_w // 2))
         left_w = min(left_w, frame_w - 8)
         left_x = frame_x + 2
@@ -801,36 +1092,73 @@ class GameEngine:
             map_w,
             (session.player_x, session.player_y),
             (session.exit_x, session.exit_y),
+            set(session.treasures.keys()),
         )
 
         text_x = center_x + 2
         text_w = center_w - 4
-        self._safe_addstr(
+        status_h = 5
+        status_w = max(18, min(text_w, 28))
+        self._draw_status_box(
             stdscr,
             content_y + 1,
             text_x,
-            f"{self.player.name} HP {self.player.hp}/{self.player.max_hp}",
-            self._c(5) | curses.A_BOLD,
+            status_w,
+            self.player.hp,
+            self.player.max_hp,
+            self.player.mp,
+            self.player.max_mp,
+            "STATUS",
+        )
+        monster_name_attr = self._c(4) | curses.A_BOLD if monster_flash else self._c(3) | curses.A_BOLD
+        self._safe_addstr(
+            stdscr,
+            content_y + 1,
+            text_x + status_w + 1,
+            monster.name[: max(0, text_w - status_w - 1)],
+            monster_name_attr,
         )
         self._safe_addstr(
             stdscr,
             content_y + 2,
-            text_x,
-            f"{monster.name} HP {max(0, monster.hp)}",
-            self._c(3) | curses.A_BOLD,
+            text_x + status_w + 1,
+            f"Enemy HP {max(0, monster.hp)}"[: max(0, text_w - status_w - 1)],
+            self._c(4) | curses.A_BOLD,
         )
 
+        info_h = 5
+        info_y = content_y + status_h + 1
+        if info_y + info_h < content_y + center_h - 10:
+            self._draw_panel(stdscr, info_y, text_x, info_h, text_w, "INFO")
+            self._safe_addstr(
+                stdscr,
+                info_y + 1,
+                text_x + 2,
+                "Player ATK: Precise rhythm | Crit chance 15%"[: text_w - 4],
+                self._c(5),
+            )
+            self._safe_addstr(
+                stdscr,
+                info_y + 2,
+                text_x + 2,
+                f"{monster.name} ATK: Brutal swings | High variance"[: text_w - 4],
+                self._c(7),
+            )
+        else:
+            info_h = 0
+
         art_lines = self._enemy_art_lines(monster.name)
-        art_start_y = content_y + 4
+        art_start_y = content_y + 2 + status_h + (info_h + 1 if info_h else 0)
         for i, line in enumerate(art_lines):
             y = art_start_y + i
-            if y >= content_y + center_h - 7:
+            if y >= content_y + center_h - 10:
                 break
             centered_x = text_x + max(0, (text_w - len(line)) // 2)
-            self._safe_addstr(stdscr, y, centered_x, line[:text_w], self._c(2) | curses.A_BOLD)
+            art_attr = self._c(4) | curses.A_BOLD if monster_flash else self._c(2) | curses.A_BOLD
+            self._safe_addstr(stdscr, y, centered_x, line[:text_w], art_attr)
 
         option_top = art_start_y + len(art_lines) + 1
-        option_top = min(option_top, content_y + center_h - 8)
+        option_top = min(option_top, content_y + center_h - 9)
         for idx, label in enumerate(COMBAT_OPTIONS):
             ox = text_x + (idx % 2) * (text_w // 2)
             oy = option_top + (idx // 2) * 2
@@ -842,7 +1170,7 @@ class GameEngine:
             stdscr,
             option_top + 4,
             text_x,
-            f"Potions: {self.player.potions}",
+            f"Potions: {self.player.potions}  MP: {self.player.mp}/{self.player.max_mp}",
             self._c(5),
         )
 
@@ -853,12 +1181,15 @@ class GameEngine:
             self._safe_addstr(stdscr, log_y, text_x, line[:text_w], self._c(2))
             log_y += 1
 
-        self._safe_addstr(
+        latest = log[-1] if log else "Choose your action."
+        self._draw_dialog_box(
             stdscr,
-            frame_y + frame_h - 2,
-            frame_x + 2,
-            "W/A/S/D or arrows move | Enter confirm"[: frame_w - 4],
-            self._c(1) | curses.A_BOLD,
+            frame_y,
+            frame_x,
+            frame_h,
+            frame_w,
+            latest,
+            "W/A/S/D or arrows move | Enter confirm",
         )
         stdscr.refresh()
 
@@ -903,7 +1234,7 @@ class GameEngine:
     def _draw_background(self, stdscr: curses.window, phase: int) -> None:
         stdscr.erase()
         max_y, max_x = stdscr.getmaxyx()
-        glyphs = ".:!/^$"
+        glyphs = ".:."
         border_attr = self._c(1)
         for x in range(max_x):
             top = glyphs[(x * 5 + phase + self._bg_seed) % len(glyphs)]
@@ -920,10 +1251,10 @@ class GameEngine:
             for x in range(max_x):
                 if x in (0, max_x - 1) or y in (0, max_y - 1):
                     continue
-                if ((x * 19 + y * 23 + phase + self._bg_seed) % 61) != 0:
+                if ((x * 19 + y * 23 + phase + self._bg_seed) % 113) != 0:
                     continue
                 ch = glyphs[(x + y + phase) % len(glyphs)]
-                color = self._c(2 + ((x + y + phase) % 3))
+                color = self._c(7) | curses.A_DIM
                 self._safe_addstr(stdscr, y, x, ch, color)
 
     def _draw_panel(self, stdscr: curses.window, y: int, x: int, h: int, w: int, title: str = "") -> None:
@@ -935,22 +1266,53 @@ class GameEngine:
 
         for yy in range(y + 1, y2):
             for xx in range(x + 1, x2):
-                self._safe_addstr(stdscr, yy, xx, " ", self._c(5))
+                self._safe_addstr(stdscr, yy, xx, " ", self._ui_fill())
 
-        hline = "-" * max(0, x2 - x - 1)
+        hline = self._g("h") * max(0, x2 - x - 1)
         self._safe_addstr(stdscr, y, x + 1, hline, self._c(1))
         self._safe_addstr(stdscr, y2, x + 1, hline, self._c(1))
         for yy in range(y + 1, y2):
-            self._safe_addstr(stdscr, yy, x, "|", self._c(1))
-            self._safe_addstr(stdscr, yy, x2, "|", self._c(1))
-        self._safe_addstr(stdscr, y, x, "+", self._c(3))
-        self._safe_addstr(stdscr, y, x2, "+", self._c(3))
-        self._safe_addstr(stdscr, y2, x, "+", self._c(3))
-        self._safe_addstr(stdscr, y2, x2, "+", self._c(3))
+            self._safe_addstr(stdscr, yy, x, self._g("v"), self._c(1))
+            self._safe_addstr(stdscr, yy, x2, self._g("v"), self._c(1))
+        self._safe_addstr(stdscr, y, x, self._g("tl"), self._c(3))
+        self._safe_addstr(stdscr, y, x2, self._g("tr"), self._c(3))
+        self._safe_addstr(stdscr, y2, x, self._g("bl"), self._c(3))
+        self._safe_addstr(stdscr, y2, x2, self._g("br"), self._c(3))
 
         if title:
             title_text = f" {title} "
             self._safe_addstr(stdscr, y, x + 2, title_text[: max(0, x2 - x - 3)], self._c(3) | curses.A_BOLD)
+
+    def _draw_dialog_box(
+        self,
+        stdscr: curses.window,
+        frame_y: int,
+        frame_x: int,
+        frame_h: int,
+        frame_w: int,
+        text: str,
+        hint: str = "",
+    ) -> None:
+        box_h = 4
+        box_w = max(24, frame_w - 4)
+        box_x = frame_x + 2
+        box_y = frame_y + frame_h - box_h - 2
+        self._draw_panel(stdscr, box_y, box_x, box_h, box_w, "MESSAGE")
+        self._safe_addstr(
+            stdscr,
+            box_y + 1,
+            box_x + 2,
+            text[: box_w - 4],
+            self._ui_text(),
+        )
+        if hint:
+            self._safe_addstr(
+                stdscr,
+                box_y + 2,
+                box_x + 2,
+                hint[: box_w - 4],
+                self._ui_muted(),
+            )
 
     def _draw_map(
         self,
@@ -962,19 +1324,24 @@ class GameEngine:
         max_w: int,
         player_pos: tuple[int, int],
         exit_pos: tuple[int, int],
+        treasure_positions: set[tuple[int, int]] | None = None,
     ) -> None:
         player_x, player_y = player_pos
         exit_x, exit_y = exit_pos
+        treasure_positions = treasure_positions or set()
         for y in range(min(max_h, len(grid))):
             for x in range(min(max_w, len(grid[0]))):
                 tile = grid[y][x]
-                ch = self._tile_char(x, y, tile)
+                ch = self._tile_char(grid, x, y, tile)
                 if tile == TILE_FLOOR:
-                    color = self._c(1)
+                    color = self._c(5) | curses.A_DIM
                 elif tile == TILE_DOOR:
                     color = self._c(3) | curses.A_BOLD
                 else:
-                    color = self._c(2)
+                    color = self._c(1) | curses.A_BOLD
+                if (x, y) in treasure_positions:
+                    ch = "T" if not self._unicode_ui else "✦"
+                    color = self._c(3) | curses.A_BOLD
                 if (x, y) == (exit_x, exit_y):
                     ch = "D"
                     color = self._c(3) | curses.A_BOLD
@@ -1030,18 +1397,63 @@ class GameEngine:
         return (
             f"{self.player.name} [{self.player.archetype}] "
             f"Lv{self.player.level} HP {self.player.hp}/{self.player.max_hp} "
+            f"MP {self.player.mp}/{self.player.max_mp} "
             f"Gold {self.player.gold} Potions {self.player.potions} "
             f"Dungeon {self.dungeon_level}"
         )
 
-    def _tile_char(self, x: int, y: int, tile: int) -> str:
+    def _tile_char(self, grid: list[list[int]], x: int, y: int, tile: int) -> str:
         if tile == TILE_DOOR:
             return "D"
         if tile == TILE_FLOOR:
-            floors = ".:,'`"
-            return floors[(x * 11 + y * 7 + self._bg_seed) % len(floors)]
-        walls = "#/^W"
-        return walls[(x * 13 + y * 5 + self._bg_seed) % len(walls)]
+            if not self._unicode_ui:
+                return "." if ((x * 5 + y * 3 + self._bg_seed) % 9) else ","
+            if ((x * 7 + y * 11 + self._bg_seed) % 31) == 0:
+                return "✧"
+            if ((x * 3 + y * 5 + self._bg_seed) % 17) == 0:
+                return "⋅"
+            return "·"
+        if not self._unicode_ui:
+            return "#"
+        return self._wall_glyph(grid, x, y)
+
+    def _wall_glyph(self, grid: list[list[int]], x: int, y: int) -> str:
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+
+        def is_wall(nx: int, ny: int) -> bool:
+            if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                return True
+            return grid[ny][nx] != TILE_FLOOR
+
+        n = is_wall(x, y - 1)
+        s = is_wall(x, y + 1)
+        e = is_wall(x + 1, y)
+        wv = is_wall(x - 1, y)
+
+        if n and s and e and wv:
+            return "█"
+        if n and s and not e and not wv:
+            return "│"
+        if not n and not s and e and wv:
+            return "─"
+        if n and e and not s and not wv:
+            return "└"
+        if n and wv and not s and not e:
+            return "┘"
+        if s and e and not n and not wv:
+            return "┌"
+        if s and wv and not n and not e:
+            return "┐"
+        if n and s and e and not wv:
+            return "├"
+        if n and s and wv and not e:
+            return "┤"
+        if n and e and wv and not s:
+            return "┴"
+        if s and e and wv and not n:
+            return "┬"
+        return "▓"
 
     def _is_walkable_tile(self, tile: int) -> bool:
         return tile in (TILE_FLOOR, TILE_DOOR)
@@ -1063,6 +1475,116 @@ class GameEngine:
         mitigation = defender_defense // 2
         return max(1, raw - mitigation)
 
+    def _roll_player_damage(
+        self,
+        attacker_strength: int,
+        defender_defense: int,
+        bonus: int = 0,
+    ) -> tuple[int, str]:
+        crit = random.random() < 0.15
+        variance = random.randint(-1, 4)
+        raw = attacker_strength + bonus + variance + (4 if crit else 0)
+        mitigation = defender_defense // 2
+        damage = max(1, raw - mitigation)
+        return damage, ("Critical strike!" if crit else "")
+
+    def _roll_enemy_damage(
+        self,
+        attacker_strength: int,
+        defender_defense: int,
+    ) -> tuple[int, str]:
+        wild = random.randint(-4, 6)
+        raw = attacker_strength + wild
+        mitigation = defender_defense // 3
+        damage = max(1, raw - mitigation)
+        if wild >= 5:
+            return damage, "Heavy blow!"
+        if wild <= -3:
+            return damage, "Glancing hit."
+        return damage, ""
+
+    def _draw_status_box(
+        self,
+        stdscr: curses.window,
+        y: int,
+        x: int,
+        width: int,
+        hp: int,
+        max_hp: int,
+        mp: int,
+        max_mp: int,
+        title: str,
+    ) -> None:
+        if width < 18:
+            return
+        inner = max(6, width - 4)
+        head = f" {title} "
+        h = self._g("h")
+        top_fill = max(0, width - 2 - len(head))
+        self._safe_addstr(stdscr, y, x, self._g("tl") + head + (h * top_fill) + self._g("tr"), self._c(1))
+
+        bar_w = max(6, min(12, inner - 7))
+        hp_bar = self._bar_blocks(hp, max_hp, bar_w)
+        mp_bar = self._bar_blocks(mp, max_mp, bar_w)
+        hp_attr = self._hp_bar_attr(hp, max_hp)
+        mp_attr = self._c(11) | curses.A_BOLD
+        hp_row = f"HP {hp_bar} {max(0, hp):>3}/{max(1, max_hp):<3}"
+        mp_row = f"MP {mp_bar} {max(0, mp):>3}/{max(1, max_mp):<3}"
+        self._safe_addstr(stdscr, y + 1, x, self._g("v"), self._c(1))
+        self._safe_addstr(stdscr, y + 1, x + 1, hp_row[: width - 2].ljust(width - 2), hp_attr)
+        self._safe_addstr(stdscr, y + 1, x + width - 1, self._g("v"), self._c(1))
+
+        self._safe_addstr(stdscr, y + 2, x, self._g("v"), self._c(1))
+        self._safe_addstr(stdscr, y + 2, x + 1, mp_row[: width - 2].ljust(width - 2), mp_attr)
+        self._safe_addstr(stdscr, y + 2, x + width - 1, self._g("v"), self._c(1))
+
+        self._safe_addstr(stdscr, y + 3, x, self._g("bl") + (h * (width - 2)) + self._g("br"), self._c(1))
+
+    def _hp_bar_attr(self, hp: int, max_hp: int) -> int:
+        if max_hp <= 0:
+            return self._c(10) | curses.A_BOLD
+        ratio = hp / max_hp
+        if ratio > 0.60:
+            return self._c(8) | curses.A_BOLD
+        if ratio > 0.30:
+            return self._c(9) | curses.A_BOLD
+        return self._c(10) | curses.A_BOLD
+
+    def _bar_blocks(self, value: int, max_value: int, width: int) -> str:
+        full = self._g("full")
+        empty = self._g("empty")
+        if max_value <= 0:
+            return empty * width
+        ratio = max(0.0, min(1.0, value / max_value))
+        filled = int(round(width * ratio))
+        filled = max(0, min(width, filled))
+        return (full * filled) + (empty * (width - filled))
+
+    def _g(self, name: str) -> str:
+        ascii_set = {
+            "tl": "+",
+            "tr": "+",
+            "bl": "+",
+            "br": "+",
+            "h": "-",
+            "v": "|",
+            "full": "#",
+            "empty": ".",
+        }
+        unicode_set = {
+            "tl": "┌",
+            "tr": "┐",
+            "bl": "└",
+            "br": "┘",
+            "h": "─",
+            "v": "│",
+            "full": "█",
+            "empty": "░",
+        }
+        if not self._unicode_ui:
+            return ascii_set.get(name, "?")
+        return unicode_set.get(name, ascii_set.get(name, "?"))
+
     def _append_combat_log_typed(
         self,
         stdscr: curses.window,
@@ -1081,6 +1603,20 @@ class GameEngine:
         y = log_y + max(0, len(visible) - 1)
         self._typewriter_draw(stdscr, y, text_x, visible[-1][:text_w], self._c(2))
 
+    def _animate_monster_hit_flash(
+        self,
+        stdscr: curses.window,
+        monster: Monster,
+        log: list[str],
+        session: DungeonSession,
+        selected: int,
+        duration: float = 0.24,
+    ) -> None:
+        end = time.monotonic() + max(0.08, duration)
+        while time.monotonic() < end:
+            self._draw_combat(stdscr, monster, log, session, selected)
+            time.sleep(0.04)
+
     def _combat_log_coords(
         self,
         stdscr: curses.window,
@@ -1089,7 +1625,7 @@ class GameEngine:
     ) -> tuple[int, int, int]:
         frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
         content_y = frame_y + 2
-        content_h = frame_h - 5
+        content_h = frame_h - 9
         left_w = min(len(session.grid[0]) + 2, max(26, frame_w // 2))
         left_w = min(left_w, frame_w - 8)
         left_x = frame_x + 2
@@ -1105,9 +1641,11 @@ class GameEngine:
 
         text_x = center_x + 2
         text_w = center_w - 4
+        status_h = 5
+        info_h = 5
         art_lines = self._enemy_art_lines(monster.name)
-        option_top = content_y + 4 + len(art_lines) + 1
-        option_top = min(option_top, content_y + content_h - 8)
+        option_top = content_y + 2 + status_h + info_h + 1 + len(art_lines) + 1
+        option_top = min(option_top, content_y + content_h - 9)
         log_y = option_top + 5
         return text_x, text_w, log_y
 
@@ -1115,22 +1653,24 @@ class GameEngine:
         self._draw_background(stdscr, 73)
         frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
         self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w, "EVENT")
-        y = frame_y + frame_h // 2
-        x = frame_x + max(2, (frame_w - len(message)) // 2)
-        self._safe_addstr(stdscr, y - 1, max(frame_x + 2, x - 4), ":: EVENT ::", self._c(3) | curses.A_BOLD)
+        card_w = max(30, min(frame_w - 8, 72))
+        card_h = 7
+        card_x = frame_x + (frame_w - card_w) // 2
+        card_y = frame_y + (frame_h - card_h) // 2
+        self._draw_panel(stdscr, card_y, card_x, card_h, card_w, "EVENT")
         self._typewriter_draw(
             stdscr,
-            y,
-            x,
-            message[: frame_w - 4],
+            card_y + 2,
+            card_x + 2,
+            message[: card_w - 4],
             self._c(5) | curses.A_BOLD,
         )
         self._typewriter_draw(
             stdscr,
-            y + 2,
-            max(frame_x + 2, x - 2),
-            "Press any key...",
-            self._c(1),
+            card_y + 4,
+            card_x + 2,
+            "Press any key to continue."[: card_w - 4],
+            self._c(3) | curses.A_BOLD,
         )
         stdscr.refresh()
         stdscr.getch()
@@ -1157,15 +1697,12 @@ class GameEngine:
         stdscr.nodelay(True)
         try:
             rendered = ""
-            for i, ch in enumerate(text):
-                key = stdscr.getch()
-                if key in (10, 13, curses.KEY_ENTER):
+            for ch in text:
+                if self._is_skip_pressed(stdscr):
                     self._typing_skip_until = time.monotonic() + 0.6
                     self._safe_addstr(stdscr, y, x, text, attr)
                     stdscr.refresh()
                     return
-                if key != -1:
-                    curses.ungetch(key)
 
                 rendered += ch
                 self._safe_addstr(stdscr, y, x, rendered, attr)
@@ -1173,17 +1710,22 @@ class GameEngine:
 
                 sleep_steps = max(1, int(self._typing_delay / 0.005))
                 for _ in range(sleep_steps):
-                    key = stdscr.getch()
-                    if key in (10, 13, curses.KEY_ENTER):
+                    if self._is_skip_pressed(stdscr):
                         self._typing_skip_until = time.monotonic() + 0.6
                         self._safe_addstr(stdscr, y, x, text, attr)
                         stdscr.refresh()
                         return
-                    if key != -1:
-                        curses.ungetch(key)
                     time.sleep(0.005)
         finally:
             stdscr.nodelay(False)
+
+    def _is_skip_pressed(self, stdscr: curses.window) -> bool:
+        while True:
+            key = stdscr.getch()
+            if key == -1:
+                return False
+            if key in (10, 13, curses.KEY_ENTER):
+                return True
 
     def _safe_addstr(self, stdscr: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
         max_y, max_x = stdscr.getmaxyx()
@@ -1206,3 +1748,12 @@ class GameEngine:
         if not curses.has_colors():
             return 0
         return curses.color_pair(pair_id)
+
+    def _ui_text(self) -> int:
+        return self._c(5) | curses.A_BOLD
+
+    def _ui_muted(self) -> int:
+        return self._c(7) | curses.A_DIM
+
+    def _ui_fill(self) -> int:
+        return self._c(7) | curses.A_DIM
