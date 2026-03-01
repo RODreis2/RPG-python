@@ -1,4 +1,5 @@
 import curses
+import math
 import os
 import random
 import time
@@ -131,6 +132,8 @@ class DungeonSession:
     exit_x: int
     exit_y: int
     treasures: dict[tuple[int, int], str]
+    boss_pos: tuple[int, int] | None = None
+    boss_defeated: bool = True
     message: str = "Explore carefully."
 
 
@@ -252,13 +255,31 @@ class GameEngine:
         while (exit_x, exit_y) == (player_x, player_y):
             exit_x, exit_y = dungeon.random_floor_tile()
 
+        occupied: set[tuple[int, int]] = {(player_x, player_y), (exit_x, exit_y)}
+        boss_pos: tuple[int, int] | None = None
+        if self.dungeon_level % 5 == 0:
+            boss_pos = self._generate_dungeon_boss_pos(dungeon, occupied)
+            if boss_pos is not None:
+                occupied.add(boss_pos)
+
         treasures = self._generate_dungeon_treasures(
             dungeon,
-            occupied={(player_x, player_y), (exit_x, exit_y)},
+            occupied=occupied,
         )
-        session = DungeonSession(grid, player_x, player_y, exit_x, exit_y, treasures)
+        session = DungeonSession(
+            grid,
+            player_x,
+            player_y,
+            exit_x,
+            exit_y,
+            treasures,
+            boss_pos=boss_pos,
+            boss_defeated=boss_pos is None,
+        )
         session.grid[exit_y][exit_x] = TILE_DOOR
         session.message = f"Dungeon Level {self.dungeon_level} | Treasures: {len(session.treasures)}"
+        if session.boss_pos is not None and not session.boss_defeated:
+            session.message += " | Boss: Hunt B before the door."
 
         while self.player.is_alive():
             self._draw_dungeon(stdscr, session)
@@ -284,6 +305,24 @@ class GameEngine:
                 continue
 
             session.player_x, session.player_y = nx, ny
+            if (
+                (nx, ny) == (session.exit_x, session.exit_y)
+                and session.boss_pos is not None
+                and not session.boss_defeated
+            ):
+                session.message = "A dark seal blocks the door. Defeat the boss first."
+                continue
+
+            if (nx, ny) == session.boss_pos and not session.boss_defeated:
+                boss = self._create_dungeon_boss()
+                if not self._combat_mode(stdscr, boss, session):
+                    return
+                session.boss_defeated = True
+                bounty = random.randint(25, 45)
+                self.player.gold += bounty
+                session.message = f"Boss defeated: {boss.name}. +{bounty} gold."
+                continue
+
             if (nx, ny) == (session.exit_x, session.exit_y):
                 bonus = random.randint(10, 22)
                 self.player.gold += bonus
@@ -365,6 +404,40 @@ class GameEngine:
                 continue
             treasures[(tx, ty)] = random.choice(loot_pool)
         return treasures
+
+    def _generate_dungeon_boss_pos(
+        self,
+        dungeon: DungeonMap,
+        occupied: set[tuple[int, int]],
+    ) -> tuple[int, int] | None:
+        attempts = 0
+        while attempts < 200:
+            attempts += 1
+            bx, by = dungeon.random_floor_tile()
+            if (bx, by) in occupied:
+                continue
+            return bx, by
+        return None
+
+    def _create_dungeon_boss(self) -> Monster:
+        template = max(
+            self.monsters,
+            key=lambda m: int(m.get("hp", 1)) + int(m.get("strength", 1)) * 3,
+        )
+        tier = self._difficulty_tier()
+        hp = max(1, int(round(template["hp"] * 1.8 * (1 + 0.18 * tier))))
+        strength = max(1, int(round(template["strength"] * (1 + 0.20 * tier))))
+        defense = max(1, int(round(template["defense"] * (1 + 0.15 * tier))))
+        speed = max(1, int(round(template["speed"] * (1 + 0.08 * tier))))
+        return Monster(
+            name=f"Boss {template['name']}",
+            hp=hp,
+            strength=strength,
+            defense=defense,
+            speed=speed,
+            xp_reward=max(1, int(round(template["xp_reward"] * 2.0))),
+            gold_reward=max(1, int(round(template["gold_reward"] * 2.0))),
+        )
 
     def _collect_dungeon_treasure(self, session: DungeonSession, pos: tuple[int, int]) -> str:
         assert self.player is not None
@@ -1023,6 +1096,8 @@ class GameEngine:
             (session.player_x, session.player_y),
             (session.exit_x, session.exit_y),
             set(session.treasures.keys()),
+            session.boss_pos,
+            session.boss_defeated,
         )
 
         self._safe_addstr(
@@ -1052,6 +1127,10 @@ class GameEngine:
         selected: int,
     ) -> None:
         assert self.player is not None
+        if monster.name.lower().startswith("boss "):
+            self._draw_boss_combat(stdscr, monster, log, selected)
+            return
+
         blink_phase = int(time.monotonic() * 18) % 2 == 0
         monster_flash = time.monotonic() < self._monster_hit_flash_until and blink_phase
         self._draw_background(stdscr, 59)
@@ -1093,6 +1172,8 @@ class GameEngine:
             (session.player_x, session.player_y),
             (session.exit_x, session.exit_y),
             set(session.treasures.keys()),
+            session.boss_pos,
+            session.boss_defeated,
         )
 
         text_x = center_x + 2
@@ -1182,6 +1263,99 @@ class GameEngine:
             log_y += 1
 
         latest = log[-1] if log else "Choose your action."
+        self._draw_dialog_box(
+            stdscr,
+            frame_y,
+            frame_x,
+            frame_h,
+            frame_w,
+            latest,
+            "W/A/S/D or arrows move | Enter confirm",
+        )
+        stdscr.refresh()
+
+    def _draw_boss_combat(
+        self,
+        stdscr: curses.window,
+        monster: Monster,
+        log: list[str],
+        selected: int,
+    ) -> None:
+        assert self.player is not None
+        blink_phase = int(time.monotonic() * 18) % 2 == 0
+        monster_flash = time.monotonic() < self._monster_hit_flash_until and blink_phase
+        self._draw_background(stdscr, 77)
+        frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
+        self._draw_panel(stdscr, frame_y, frame_x, frame_h, frame_w, "BOSS ENCOUNTER")
+
+        battle_h = max(10, min(24, frame_h - 9))
+        battle_w = max(28, min(80, frame_w - 6))
+        battle_y = frame_y + 2 + max(0, (frame_h - 9 - battle_h) // 2)
+        battle_x = frame_x + max(2, (frame_w - battle_w) // 2)
+        self._draw_panel(stdscr, battle_y, battle_x, battle_h, battle_w, "FINAL BATTLE")
+
+        top_y = battle_y + 1
+        text_x = battle_x + 2
+        text_w = battle_w - 4
+        self._safe_addstr(
+            stdscr,
+            top_y,
+            text_x,
+            f"{self.player.name}  LV {self.player.level}  HP {self.player.hp}/{self.player.max_hp}  MP {self.player.mp}/{self.player.max_mp}"[
+                :text_w
+            ],
+            self._c(5) | curses.A_BOLD,
+        )
+        self._safe_addstr(
+            stdscr,
+            top_y + 1,
+            text_x,
+            f"* {monster.name}  HP {max(0, monster.hp)}"[:text_w],
+            (self._c(4) | curses.A_BOLD) if monster_flash else (self._c(3) | curses.A_BOLD),
+        )
+
+        art_lines = self._enemy_art_lines(monster.name)
+        art_y = top_y + 3
+        for i, line in enumerate(art_lines):
+            y = art_y + i
+            if y >= battle_y + battle_h - 10:
+                break
+            centered_x = battle_x + max(2, (battle_w - len(line)) // 2)
+            art_attr = self._c(4) | curses.A_BOLD if monster_flash else self._c(2) | curses.A_BOLD
+            self._safe_addstr(stdscr, y, centered_x, line[: battle_w - 4], art_attr)
+
+        arena_h = min(7, max(5, battle_h - 7))
+        arena_w = max(18, min(46, battle_w - 8))
+        arena_x = battle_x + (battle_w - arena_w) // 2
+        arena_y = min(battle_y + battle_h - 12, art_y + len(art_lines) + 1)
+        arena_y = max(arena_y, top_y + 5)
+        self._draw_panel(stdscr, arena_y, arena_x, arena_h, arena_w, "ARENA")
+
+        # Undertale-inspired soul indicator drifting inside the battle box.
+        inner_w = max(1, arena_w - 2)
+        inner_h = max(1, arena_h - 2)
+        t = time.monotonic()
+        soul_x = arena_x + 1 + int((inner_w - 1) * (0.5 + 0.45 * math.sin(t * 2.1)))
+        soul_y = arena_y + 1 + int((inner_h - 1) * (0.5 + 0.45 * math.cos(t * 2.6)))
+        soul_glyph = "♥" if self._unicode_ui else "*"
+        self._safe_addstr(stdscr, soul_y, soul_x, soul_glyph, self._c(4) | curses.A_BOLD)
+
+        action_y = battle_y + battle_h - 4
+        action_labels = ["FIGHT", "SKILL", "ITEM", "MERCY"]
+        slot_w = max(6, (battle_w - 4) // 4)
+        for idx, label in enumerate(action_labels):
+            ox = battle_x + 2 + idx * slot_w
+            marker = ">" if idx == selected else " "
+            text = f"{marker}{label}"
+            attr = self._c(3) | curses.A_BOLD if idx == selected else self._c(5)
+            self._safe_addstr(stdscr, action_y, ox, text[: max(0, slot_w - 1)], attr)
+
+        log_y = action_y - 2
+        for line in log[-2:]:
+            self._safe_addstr(stdscr, log_y, text_x, line[:text_w], self._c(2))
+            log_y += 1
+
+        latest = log[-1] if log else "Stay determined."
         self._draw_dialog_box(
             stdscr,
             frame_y,
@@ -1325,6 +1499,8 @@ class GameEngine:
         player_pos: tuple[int, int],
         exit_pos: tuple[int, int],
         treasure_positions: set[tuple[int, int]] | None = None,
+        boss_pos: tuple[int, int] | None = None,
+        boss_defeated: bool = True,
     ) -> None:
         player_x, player_y = player_pos
         exit_x, exit_y = exit_pos
@@ -1342,6 +1518,9 @@ class GameEngine:
                 if (x, y) in treasure_positions:
                     ch = "T" if not self._unicode_ui else "✦"
                     color = self._c(3) | curses.A_BOLD
+                if (x, y) == boss_pos and not boss_defeated:
+                    ch = "B"
+                    color = self._c(4) | curses.A_BOLD
                 if (x, y) == (exit_x, exit_y):
                     ch = "D"
                     color = self._c(3) | curses.A_BOLD
@@ -1623,6 +1802,18 @@ class GameEngine:
         monster: Monster,
         session: DungeonSession,
     ) -> tuple[int, int, int]:
+        if monster.name.lower().startswith("boss "):
+            frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
+            battle_h = max(10, min(24, frame_h - 9))
+            battle_w = max(28, min(80, frame_w - 6))
+            battle_y = frame_y + 2 + max(0, (frame_h - 9 - battle_h) // 2)
+            battle_x = frame_x + max(2, (frame_w - battle_w) // 2)
+            text_x = battle_x + 2
+            text_w = battle_w - 4
+            action_y = battle_y + battle_h - 4
+            log_y = action_y - 2
+            return text_x, text_w, log_y
+
         frame_y, frame_x, frame_h, frame_w = self._frame_rect(stdscr)
         content_y = frame_y + 2
         content_h = frame_h - 9
